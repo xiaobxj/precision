@@ -1,0 +1,125 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { once } from 'node:events';
+import { createApp } from '../server.mjs';
+import { applyCommand, emptyState, progressItems, taskStatus, tasksOnDay } from '../lib/domain.mjs';
+
+function fixture() {
+  let state = emptyState();
+  let serial = 0;
+  const run = command => { state = applyCommand(state, command, '2026-09-30T10:00:00+08:00', () => `nested-${++serial}`); return state; };
+  run({ type: 'create-task', title: '大任务', date: '2026-09-29' });
+  const taskId = state.tasks[0].id;
+  run({ type: 'create-step', taskId, title: '方向 A', content: '保留原文\n换行', status: 'done', images: [{ id: 'a'.repeat(64), name: '原截图.png' }] });
+  run({ type: 'create-step', taskId, title: '方向 B', status: 'done' });
+  run({ type: 'create-task', title: '其他任务', date: '2026-09-30' });
+  run({ type: 'create-note', title: '长期记录', content: '思考过程', conclusion: '结论' });
+  state.tasks[0].steps[0].customField = { keep: true };
+  return { run, taskId, stepId: state.tasks[0].steps[0].id, otherId: state.tasks[0].steps[1].id, get state() { return state; }, get step() { return state.tasks[0].steps.find(step => step.id === this.stepId); } };
+}
+
+test('children extend existing directions without replacing legacy text, images, IDs or unrelated data', () => {
+  const f = fixture();
+  const before = structuredClone(f.state);
+  f.run({ type: 'create-substep', taskId: f.taskId, stepId: f.stepId, title: '新增验证', content: '完整输出', status: 'waiting' });
+  const step = f.step;
+  for (const key of ['id', 'title', 'content', 'images', 'createdAt', 'customField']) assert.deepEqual(step[key], before.tasks[0].steps[0][key]);
+  assert.deepEqual(f.state.tasks[0].steps[1], before.tasks[0].steps[1]);
+  assert.deepEqual(f.state.tasks[1], before.tasks[1]);
+  assert.deepEqual(f.state.notes, before.notes);
+  assert.deepEqual(f.state.activities.slice(1), before.activities);
+  assert.equal(step.substeps.length, 1);
+  assert.equal(step.status, 'waiting');
+  assert.equal(f.state.tasks[0].completedAt, null);
+  assert.equal(taskStatus(f.state.tasks[0]), 'waiting');
+  assert.equal(tasksOnDay(f.state.tasks, '2026-10-01').length, 2);
+  assert.equal(Object.hasOwn(before.tasks[0].steps[0], 'substeps'), false);
+});
+
+test('child completion, reopening and deletion roll up to the direction and task without double counting', () => {
+  const f = fixture();
+  const command = { taskId: f.taskId, stepId: f.stepId };
+  f.run({ ...command, type: 'create-substep', title: 'A1', status: 'done' });
+  assert.equal(taskStatus(f.state.tasks[0]), 'done');
+  f.run({ ...command, type: 'create-substep', title: 'A2', status: 'todo' });
+  assert.equal(f.step.status, 'active');
+  assert.equal(f.step.completedAt, null);
+  const children = f.step.substeps;
+  assert.deepEqual(progressItems(f.state.tasks[0]).map(item => item.title), ['A1', 'A2', '方向 B']);
+  const before = structuredClone(f.state);
+  assert.throws(() => f.run({ ...command, type: 'set-step-status', status: 'done' }), /子进度自动汇总/);
+  assert.throws(() => f.run({ ...command, type: 'edit-step', title: 'cannot bypass', status: 'done' }), /子进度自动汇总/);
+  assert.throws(() => f.run({ type: 'complete-task', taskId: f.taskId }), /子进度/);
+  assert.deepEqual(f.state, before);
+  f.run({ ...command, type: 'set-substep-status', substepId: children[1].id, status: 'done' });
+  assert.equal(taskStatus(f.state.tasks[0]), 'done');
+  f.run({ ...command, type: 'set-substep-status', substepId: children[0].id, status: 'waiting' });
+  assert.equal(taskStatus(f.state.tasks[0]), 'waiting');
+  f.run({ ...command, type: 'delete-substep', substepId: children[0].id });
+  assert.equal(taskStatus(f.state.tasks[0]), 'done');
+  f.run({ ...command, type: 'delete-substep', substepId: children[1].id });
+  assert.equal(taskStatus(f.state.tasks[0]), 'active');
+  assert.equal(f.step.status, 'active');
+  assert.deepEqual(f.step.substeps, []);
+  f.run({ ...command, type: 'set-step-status', status: 'done' });
+  assert.equal(taskStatus(f.state.tasks[0]), 'done');
+});
+
+test('child edits and ordering preserve attachments; child IDs are scoped to the selected direction and task', () => {
+  const f = fixture();
+  const command = { taskId: f.taskId, stepId: f.stepId };
+  f.run({ ...command, type: 'create-substep', title: 'A1', content: '多行\n文本', images: [{ id: 'b'.repeat(64), name: '子截图.png' }] });
+  f.run({ ...command, type: 'create-substep', title: 'A2', status: 'waiting' });
+  const original = structuredClone(f.step.substeps);
+  f.run({ ...command, type: 'move-substep', substepId: original[1].id, direction: -1 });
+  assert.deepEqual(f.step.substeps, [original[1], original[0]]);
+  f.run({ ...command, type: 'edit-step', title: '方向改名', content: '原内容继续保存' });
+  assert.deepEqual(f.step.substeps, [original[1], original[0]]);
+  f.run({ ...command, type: 'edit-substep', substepId: original[0].id, title: 'A1 修订', content: '新文本', status: 'done' });
+  assert.deepEqual(f.step.substeps[1].images, original[0].images);
+  const before = structuredClone(f.state);
+  assert.throws(() => f.run({ ...command, type: 'delete-substep', stepId: f.otherId, substepId: original[0].id }), /子进度已不存在/);
+  assert.throws(() => f.run({ ...command, type: 'delete-substep', taskId: f.state.tasks[1].id, substepId: original[0].id }), /进度已不存在/);
+  assert.throws(() => f.run({ ...command, type: 'move-substep', substepId: original[1].id, direction: -1 }), /边界/);
+  assert.throws(() => f.run({ ...command, type: 'create-substep', title: 'x', images: [{ id: 'bad' }] }), /图片引用/);
+  assert.throws(() => f.run({ ...command, type: 'create-substep', title: ' ' }), /不能为空/);
+  assert.throws(() => f.run({ ...command, type: 'set-substep-status', substepId: original[0].id, status: 'invalid' }), /状态/);
+  assert.deepEqual(f.state, before);
+  f.run({ ...command, type: 'move-step', direction: 1 });
+  assert.deepEqual(f.step.substeps, before.tasks[0].steps[0].substeps);
+  f.run({ ...command, type: 'delete-step' });
+  assert.deepEqual(f.state.tasks[0].steps, [before.tasks[0].steps[1]]);
+});
+
+test('nested records persist and export after restart; stale windows and invalid image references cannot overwrite them', async t => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'procision-substeps-'));
+  let server = createApp({ dataDir });
+  const start = async () => { server.listen(0, '127.0.0.1'); await once(server, 'listening'); return `http://127.0.0.1:${server.address().port}`; };
+  let url = await start();
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  let state = emptyState();
+  const send = (command, revision = state.revision) => fetch(`${url}/api/commands`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ revision, command }) });
+  const run = async command => { const response = await send(command); assert.equal(response.status, 200); state = await response.json(); };
+  await run({ type: 'create-task', title: '持久保存', date: '2026-09-30' });
+  const taskId = state.tasks[0].id;
+  await run({ type: 'create-step', taskId, title: '原方向', content: '旧内容' });
+  const stepId = state.tasks[0].steps[0].id;
+  const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aRZkAAAAASUVORK5CYII=', 'base64');
+  const upload = await fetch(`${url}/api/images`, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: bytes });
+  assert.equal(upload.status, 201);
+  const image = await upload.json();
+  await run({ type: 'create-substep', taskId, stepId, title: '子进度', content: '图文\n保存', images: [{ id: image.id, name: '附件.png' }] });
+  const before = structuredClone(state);
+  assert.equal((await send({ type: 'create-substep', taskId, stepId, title: '旧窗口' }, 2)).status, 409);
+  assert.equal((await send({ type: 'create-substep', taskId, stepId, title: '缺失图片', images: [{ id: 'a'.repeat(64) }] })).status, 400);
+  await new Promise(resolve => server.close(resolve));
+  server = createApp({ dataDir }); url = await start();
+  assert.deepEqual(await (await fetch(`${url}/api/state`)).json(), before);
+  const exported = await (await fetch(`${url}/api/export`)).json();
+  assert.deepEqual(exported.tasks, before.tasks);
+  assert.equal(exported.imageAssets[0].base64, bytes.toString('base64'));
+  assert.deepEqual(Buffer.from(await (await fetch(`${url}/api/images/${image.id}`)).arrayBuffer()), bytes);
+});

@@ -1,0 +1,67 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { once } from 'node:events';
+import { createApp } from '../server.mjs';
+import { applyCommand, emptyState } from '../lib/domain.mjs';
+
+const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==', 'base64');
+
+test('image blobs persist, duplicate uploads deduplicate, export embeds bytes and missing references fail', async t => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'procision-images-'));
+  let server = createApp({ dataDir });
+  const start = async () => { server.listen(0, '127.0.0.1'); await once(server, 'listening'); return `http://127.0.0.1:${server.address().port}`; };
+  let url = await start();
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const upload = (bytes = png, mime = 'image/png', headers = {}) => fetch(`${url}/api/images`, { method: 'POST', headers: { 'Content-Type': mime, ...headers }, body: bytes });
+  const created = await upload();
+  assert.equal(created.status, 201);
+  const { id } = await created.json();
+  assert.match(id, /^[a-f0-9]{64}$/);
+  assert.equal((await (await upload()).json()).id, id);
+  assert.equal((await upload(Buffer.from('<svg/>'), 'image/svg+xml')).status, 400);
+  assert.equal((await upload(Buffer.from('not an image'))).status, 400);
+  assert.equal((await upload(png, 'image/jpeg')).status, 400);
+  assert.equal((await upload(png, 'image/png', { Origin: 'https://example.com' })).status, 403);
+  assert.equal((await upload(Buffer.alloc(10 * 1024 * 1024 + 1))).status, 413);
+  const post = body => fetch(`${url}/api/commands`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const note = await post({ revision: 0, command: { type: 'create-note', title: '只有图片的记录', images: [{ id, name: '截图.png' }] } });
+  assert.equal(note.status, 200);
+  const state = await note.json();
+  assert.deepEqual(state.tasks, []);
+  assert.deepEqual(state.notes[0].images, [{ id, name: '截图.png' }]);
+  assert.equal(state.imageAssets, undefined);
+  const invalid = await post({ revision: 1, command: { type: 'create-note', title: '不存在的图片', images: [{ id: 'a'.repeat(64), name: '无效.png' }] } });
+  assert.equal(invalid.status, 400);
+  assert.equal((await (await fetch(`${url}/api/state`)).json()).revision, 1);
+  await new Promise(resolve => server.close(resolve));
+  server = createApp({ dataDir }); url = await start();
+  const image = await fetch(`${url}/api/images/${id}`);
+  assert.equal(image.headers.get('content-type'), 'image/png');
+  assert.deepEqual(Buffer.from(await image.arrayBuffer()), png);
+  const exported = await (await fetch(`${url}/api/export`)).json();
+  assert.deepEqual(exported.notes, state.notes);
+  assert.equal(exported.imageAssets.length, 1);
+  assert.equal(exported.imageAssets[0].base64, png.toString('base64'));
+});
+
+test('old text-only edits preserve images and note history retains removed attachments', () => {
+  const images = [{ id: 'b'.repeat(64), name: '截图.png' }];
+  let state = applyCommand(emptyState(), { type: 'create-task', title: '任务', date: '2026-09-30', images });
+  const taskId = state.tasks[0].id;
+  state = applyCommand(state, { type: 'edit-task', taskId, title: '改标题' });
+  assert.deepEqual(state.tasks[0].images, images);
+  state = applyCommand(state, { type: 'create-step', taskId, title: '进度', images });
+  const stepId = state.tasks[0].steps[0].id;
+  state = applyCommand(state, { type: 'edit-step', taskId, stepId, title: '改进度', content: '文字', status: 'done' });
+  assert.deepEqual(state.tasks[0].steps[0].images, images);
+  state = applyCommand(state, { type: 'create-note', title: '图片记录', images });
+  const noteId = state.notes[0].id;
+  state = applyCommand(state, { type: 'edit-note', noteId, title: '只改文字', content: '正文' });
+  assert.deepEqual(state.notes[0].images, images);
+  state = applyCommand(state, { type: 'edit-note', noteId, title: '移除图片', content: '保留正文', images: [] });
+  assert.deepEqual(state.notes[0].images, []);
+  assert.deepEqual(state.notes[0].versions[0].images, images);
+});
