@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import { createApp } from '../server.mjs';
-import { applyCommand, emptyState, progressItems, taskStatus, tasksOnDay } from '../lib/domain.mjs';
+import { applyCommand, emptyState, progressItems, stepStatus, taskStatus, tasksOnDay } from '../lib/domain.mjs';
 
 function fixture() {
   let state = emptyState();
@@ -50,7 +50,7 @@ test('child completion, reopening and deletion roll up to the direction and task
   const children = f.step.substeps;
   assert.deepEqual(progressItems(f.state.tasks[0]).map(item => item.title), ['A1', 'A2', '方向 B']);
   const before = structuredClone(f.state);
-  assert.throws(() => f.run({ ...command, type: 'set-step-status', status: 'done' }), /子进度自动汇总/);
+  assert.throws(() => f.run({ ...command, type: 'set-step-status', status: 'invalid' }), /状态/);
   assert.throws(() => f.run({ ...command, type: 'edit-step', title: 'cannot bypass', status: 'done' }), /子进度自动汇总/);
   assert.throws(() => f.run({ type: 'complete-task', taskId: f.taskId }), /子进度/);
   assert.deepEqual(f.state, before);
@@ -66,6 +66,61 @@ test('child completion, reopening and deletion roll up to the direction and task
   assert.deepEqual(f.step.substeps, []);
   f.run({ ...command, type: 'set-step-status', status: 'done' });
   assert.equal(taskStatus(f.state.tasks[0]), 'done');
+});
+
+test('manual parent states survive child changes and can return to aggregation without changing children', () => {
+  const f = fixture();
+  const taskCommand = { taskId: f.taskId };
+  const directionCommand = { ...taskCommand, stepId: f.stepId };
+  f.run({ ...directionCommand, type: 'create-substep', title: '保留子项', content: '手动记录', status: 'waiting' });
+  const child = structuredClone(f.step.substeps[0]);
+  f.run({ ...taskCommand, type: 'set-task-status', status: 'active' });
+  f.run({ ...directionCommand, type: 'set-step-status', status: 'active' });
+  assert.deepEqual(f.step.substeps, [child]);
+  assert.equal(taskStatus(f.state.tasks[0]), 'active');
+  f.run({ ...directionCommand, type: 'set-substep-status', substepId: child.id, status: 'done' });
+  assert.equal(f.step.status, 'active');
+  assert.equal(f.step.completedAt, null);
+  assert.equal(f.state.tasks[0].completedAt, null);
+  assert.equal(progressItems(f.state.tasks[0]).every(item => item.status === 'done'), true);
+  f.run({ ...directionCommand, type: 'set-step-status', statusMode: 'auto' });
+  assert.equal(f.step.status, 'done');
+  assert.equal(taskStatus(f.state.tasks[0]), 'active');
+  f.run({ ...taskCommand, type: 'set-task-status', statusMode: 'auto' });
+  assert.equal(taskStatus(f.state.tasks[0]), 'done');
+  f.run({ ...directionCommand, type: 'set-substep-status', substepId: child.id, status: 'waiting' });
+  assert.equal(taskStatus(f.state.tasks[0]), 'waiting');
+  f.run({ ...directionCommand, type: 'edit-step', title: '方向改名', content: '继续记录', statusMode: 'manual', status: 'done' });
+  assert.equal(f.step.status, 'done');
+  assert.equal(f.step.substeps[0].status, 'waiting');
+  f.run({ ...directionCommand, type: 'delete-substep', substepId: child.id });
+  assert.equal(f.step.status, 'done');
+});
+
+test('an active child takes priority over waiting and legacy manual completion at every parent level', () => {
+  const f = fixture();
+  const command = { taskId: f.taskId, stepId: f.stepId };
+  f.run({ ...command, type: 'create-substep', title: '等待反馈', status: 'waiting' });
+  f.run({ ...command, type: 'create-substep', title: '继续研究', status: 'active' });
+  const activeId = f.step.substeps[1].id;
+  assert.equal(stepStatus(f.step), 'active');
+  assert.equal(taskStatus(f.state.tasks[0]), 'active');
+  assert.equal(f.state.tasks[0].completedAt, null);
+  const before = structuredClone(f.state);
+  for (const status of ['todo', 'waiting', 'done']) {
+    assert.throws(() => f.run({ ...command, type: 'set-step-status', status }), /进行中的子进度/);
+    assert.throws(() => f.run({ taskId: f.taskId, type: 'set-task-status', status }), /进行中的方向/);
+  }
+  assert.deepEqual(f.state, before);
+  const legacy = structuredClone(f.state.tasks[0]);
+  Object.assign(legacy, { status: 'done', statusMode: 'manual', completedAt: '2026-09-30T00:00:00Z' });
+  Object.assign(legacy.steps[0], { status: 'done', statusMode: 'manual' });
+  assert.equal(stepStatus(legacy.steps[0]), 'active');
+  assert.equal(taskStatus(legacy), 'active');
+  assert.equal(tasksOnDay([legacy], '2026-10-05').length, 1);
+  f.run({ ...command, type: 'set-substep-status', substepId: activeId, status: 'done' });
+  assert.equal(stepStatus(f.step), 'waiting');
+  assert.equal(taskStatus(f.state.tasks[0]), 'waiting');
 });
 
 test('child edits and ordering preserve attachments; child IDs are scoped to the selected direction and task', () => {

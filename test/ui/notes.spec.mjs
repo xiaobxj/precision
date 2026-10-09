@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures.mjs';
 
 test('long notes persist across dates and reloads; editing retains history; archive is reversible', async ({ page }) => {
   const errors = [];

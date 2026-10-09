@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { applyCommand, emptyState, localDay } from './lib/domain.mjs';
+import { createWorkbench } from './lib/workbench.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const assets = new Map([
@@ -19,9 +20,14 @@ const assets = new Map([
   ['/images.css', ['public/images.css', 'text/css; charset=utf-8']],
   ['/domain.mjs', ['lib/domain.mjs', 'text/javascript; charset=utf-8']],
   ['/favicon.svg', ['public/favicon.svg', 'image/svg+xml']],
+  ['/workbench.js', ['public/workbench.js', 'text/javascript; charset=utf-8']],
+  ['/workbench.css', ['public/workbench.css', 'text/css; charset=utf-8']],
+  ['/vendor/xterm.js', ['node_modules/@xterm/xterm/lib/xterm.js', 'text/javascript; charset=utf-8']],
+  ['/vendor/xterm.css', ['node_modules/@xterm/xterm/css/xterm.css', 'text/css; charset=utf-8']],
+  ['/vendor/fit.js', ['node_modules/@xterm/addon-fit/lib/addon-fit.js', 'text/javascript; charset=utf-8']],
 ]);
 
-export function createApp({ dataDir = process.env.PROCISION_DATA_DIR || join(root, 'data') } = {}) {
+export function createApp({ dataDir = process.env.PROCISION_DATA_DIR || join(root, 'data'), workbenchOptions = {} } = {}) {
   dataDir = resolve(dataDir);
   mkdirSync(join(dataDir, 'backups'), { recursive: true });
   const db = new DatabaseSync(join(dataDir, 'procision.sqlite'));
@@ -36,6 +42,18 @@ export function createApp({ dataDir = process.env.PROCISION_DATA_DIR || join(roo
     return state;
   };
   const json = (res, code, body) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(body)); };
+  const saveCommand = command => {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const next = applyCommand(getState(), command);
+      const backup = join(dataDir, 'backups', `${localDay()}.json`);
+      if (!existsSync(backup)) writeFileSync(backup, JSON.stringify(exportState(), null, 2), { flag: 'wx' });
+      db.prepare('UPDATE workspace SET document = ? WHERE id = 1').run(JSON.stringify(next));
+      db.exec('COMMIT');
+      return next;
+    } catch (error) { if (db.isTransaction) db.exec('ROLLBACK'); throw error; }
+  };
+  const workbench = createWorkbench({ getState, saveCommand, ...workbenchOptions });
   const server = createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -44,6 +62,7 @@ export function createApp({ dataDir = process.env.PROCISION_DATA_DIR || join(roo
       const host = req.headers.host || '';
       if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host)) return json(res, 403, { error: '只允许本机访问' });
       const url = new URL(req.url, `http://${host}`);
+      if (await workbench.route(req, res, url, json)) return;
       if (req.method === 'GET' && url.pathname === '/api/health') return json(res, 200, { app: 'procision', workspace: root });
       if (req.method === 'GET' && url.pathname === '/api/state') return json(res, 200, getState());
       if (req.method === 'GET' && /^\/api\/images\/[a-f0-9]{64}$/.test(url.pathname)) {
@@ -96,6 +115,7 @@ export function createApp({ dataDir = process.env.PROCISION_DATA_DIR || join(roo
             db.exec('ROLLBACK');
             return json(res, 409, { error: '其他窗口更新了内容。已刷新数据，请检查后重试。', state: previous });
           }
+          workbench.guard(body.command);
           const next = applyCommand(previous, body.command);
           if (body.command.images) for (const image of body.command.images) {
             if (!db.prepare('SELECT id FROM images WHERE id = ?').get(image.id)) throw new Error('图片尚未保存，请等待上传成功后重试');
@@ -122,12 +142,15 @@ export function createApp({ dataDir = process.env.PROCISION_DATA_DIR || join(roo
       json(res, 500, { error: '保存失败，请检查本地服务和磁盘空间。输入内容仍保留在窗口中。' });
     }
   });
+  workbench.attach(server);
+  const originalClose = server.close.bind(server);
+  server.close = callback => { workbench.close(); return originalClose(callback); };
   server.on('close', () => db.close());
   return server;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const port = Number(process.env.PORT || 4311);
+  const port = Number(process.env.PORT || 4312);
   const app = createApp();
   app.listen(port, '127.0.0.1', () => console.log(`Procision is ready at http://127.0.0.1:${port}`));
   app.on('error', error => { console.error(error.code === 'EADDRINUSE' ? `Port ${port} is already in use.` : error); process.exitCode = 1; });

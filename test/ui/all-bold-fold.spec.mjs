@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures.mjs';
 import { applyCommand, emptyState, localDay } from '../../lib/domain.mjs';
 
 test('all editable records keep bold; direction folding only hides content and survives refresh', async ({ page }) => {
@@ -51,7 +51,7 @@ test('all editable records keep bold; direction folding only hides content and s
   const direction = page.locator(`[data-step-id="${stepId}"]`);
   const beforeFold = structuredClone(state);
   await direction.getByRole('button', { name: '折叠方向', exact: true }).click();
-  await expect(direction).toHaveText('方向原文');
+  await expect(direction.locator('.step-title')).toHaveText('方向原文');
   await expect(direction.locator('.step-status, .step-check, .step-footer, .substep, .result-record, .step-content, .image-gallery')).toHaveCount(0);
   await expect(direction.getByRole('button', { name: '展开方向', exact: true })).toHaveAttribute('aria-expanded', 'false');
   await page.reload();

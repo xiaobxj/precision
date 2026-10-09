@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures.mjs';
 import { localDay } from '../../lib/domain.mjs';
 
 test('daily task lifecycle, ordering, persistence, edits, search and deletion', async ({ page }) => {
@@ -26,7 +26,7 @@ test('daily task lifecycle, ordering, persistence, edits, search and deletion', 
   await addStep('需求确认', '第一行\n第二行 <script>window.injected=true</script>', '进行中');
   await addStep('验证输出', '检查多行输出和本地保存', '待跟进');
   await expect(card.locator('.step')).toHaveCount(2);
-  await expect(card.locator('.status-badge')).toHaveText('待跟进');
+  await expect(card.locator('.task-title-line .status-chip')).toHaveText('进行中');
   await card.locator('.step').nth(1).getByRole('button', { name: '上移方向' }).click();
   await expect(card.locator('.step-title').first()).toHaveText('验证输出');
   await page.reload();

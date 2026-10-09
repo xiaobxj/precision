@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 
 export default defineConfig({
   testDir: './test/ui',
+  outputDir: './test-results/ui',
   fullyParallel: false,
   workers: 1,
   reporter: 'list',

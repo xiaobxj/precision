@@ -1,8 +1,9 @@
-import { localDay, tasksOnDay, taskStatus, stepStatus, progressItems, statusLabels, applyCommand, emptyState } from '/domain.mjs';
+import { localDay, tasksOnDay, taskStatus, stepStatus, progressItems, statusLabels, applyCommand, emptyState, findResult } from '/domain.mjs';
 import { createNotesUI } from '/notes.js';
 import { createImageUI } from '/images.js';
 import { renderBold, mountBoldEditors, boldValues, validateBoldEditors } from '/bold.js';
 import { createStatusUI } from '/status.js';
+import { createWorkbenchUI } from '/workbench.js';
 
 const $ = selector => document.querySelector(selector);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -38,7 +39,7 @@ const readLocal = key => { try { return localStorage.getItem(key); } catch { ret
 const saveLocal = (key, value) => { try { value === null ? localStorage.removeItem(key) : localStorage.setItem(key, value); } catch { /* The server remains the source of saved data. */ } };
 document.documentElement.dataset.theme = readLocal('procision-theme') || 'dark';
 document.documentElement.dataset.sidebar = readLocal('procision-sidebar') === 'collapsed' ? 'collapsed' : 'expanded';
-document.documentElement.dataset.insights = readLocal('procision-insights') === 'collapsed' ? 'collapsed' : 'expanded';
+document.documentElement.dataset.insights = readLocal('procision-insights') === 'expanded' ? 'expanded' : 'collapsed';
 const storedSidebarWidth = Number(readLocal('procision-sidebar-width'));
 if (storedSidebarWidth >= 200 && storedSidebarWidth <= 360) document.documentElement.style.setProperty('--sidebar-expanded-width', `${storedSidebarWidth}px`);
 
@@ -67,6 +68,8 @@ let connected = false;
 let loaded = false;
 let toastTimer;
 let formContext;
+const editorPanel = $('#editor');
+let inlineFocus;
 let insightsToggleVersion = 0;
 const columnScrollPositions = new Map();
 const separateColumns = matchMedia('(min-width: 1051px)');
@@ -107,7 +110,41 @@ separateColumns.addEventListener('change', () => {
 
 const imagesUI = createImageUI({ escape, icon, isDemo: () => demo, showError });
 const statusUI = createStatusUI({ escape, icon, showError });
-const notesUI = createNotesUI({ getState: () => state, isDemo: () => demo, isBusy: () => busy, mutate, escape, icon, readLocal, saveLocal, dateTime, imagesUI, showError });
+const notesUI = createNotesUI({ getState: () => state, isDemo: () => demo, isBusy: () => busy, mutate, escape, icon, readLocal, saveLocal, dateTime, imagesUI, showError, focusResult });
+const workbenchUI = createWorkbenchUI({ getState: () => state, isDemo: () => demo, mutate, refresh: () => load(), focusDirection, escape, readLocal, saveLocal, showError });
+
+function focusDirection(stepId) {
+  const task = state.tasks.find(task => task.steps.some(step => step.id === stepId || step.substeps?.some(child => child.id === stepId)));
+  if (!task) return;
+  const parent = task.steps.find(step => step.id === stepId || step.substeps?.some(child => child.id === stepId));
+  view = 'all'; filter = 'all'; query = ''; collapsed.delete(task.id); setStepFolded(parent.id, false); collapsedDirections.delete(parent.id);
+  render();
+  requestAnimationFrame(() => {
+    const target = $(`[data-step-id="${stepId}"], [data-substep-id="${stepId}"]`), panel = $('.task-workspace');
+    if (!target || !panel) return;
+    if (separateColumns.matches || document.documentElement.dataset.workbench === 'cli') {
+      panel.scrollTo({ top: panel.scrollTop + target.getBoundingClientRect().top - panel.getBoundingClientRect().top - 12, behavior: 'smooth' });
+      if (!separateColumns.matches) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } else target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+}
+
+function focusResult(resultId) {
+  const found = findResult(state, resultId);
+  if (!found) return showError('来源结果已不存在');
+  closeEditor();
+  view = 'all'; filter = 'all'; query = '';
+  collapsed.delete(found.task.id);
+  setStepFolded(found.step.id, false);
+  collapsedResults.delete(found.step.id);
+  render();
+  const target = [...document.querySelectorAll('[data-result-id]')].find(element => element.dataset.resultId === resultId);
+  target.tabIndex = -1;
+  target.focus({ preventScroll: true });
+  target.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'center' });
+  target.classList.add('source-highlight');
+  setTimeout(() => target.classList.remove('source-highlight'), 2400);
+}
 
 function makeDemo() {
   let sample = emptyState();
@@ -198,7 +235,7 @@ function filteredTasks() {
     const status = taskStatus(task);
     const matches = filter === 'all' || (filter === 'open' ? status !== 'done' : status === filter);
     return matches && [task.title, task.description, ...task.steps.flatMap(step => [step.title, step.content, ...(step.substeps || []).flatMap(child => [child.title, child.content]), ...(step.results || []).flatMap(result => [result.title, result.content])])].join(' ').toLowerCase().includes(query.toLowerCase());
-  }).sort((a, b) => Number(!!a.completedAt) - Number(!!b.completedAt) || b.date.localeCompare(a.date) || a.createdAt.localeCompare(b.createdAt));
+  }).sort((a, b) => Number(taskStatus(a) === 'done') - Number(taskStatus(b) === 'done') || b.date.localeCompare(a.date) || a.createdAt.localeCompare(b.createdAt));
 }
 
 function calendar() {
@@ -217,8 +254,8 @@ function calendar() {
 }
 
 function sidebar() {
-  const pending = tasksOnDay(state.tasks, localDay()).filter(task => !task.completedAt).length;
-  return `<aside class="sidebar"><a href="/" class="brand" aria-label="Procision 首页"><img src="/favicon.svg" alt=""/><span>procision<span class="brand-dot">.</span></span></a><div class="workspace-name"><span class="workspace-avatar">P</span><div>我的工作空间<small>PERSONAL WORKSPACE</small></div><span class="local-tag">本地</span></div><div class="section-label">工作台 <span>WORKSPACE</span></div><nav aria-label="工作台导航"><button class="nav-item ${view === 'day' ? 'active' : ''}" data-action="today">${icon('grid')}<span>每日任务</span><b>${pending}</b></button><button class="nav-item ${view === 'all' ? 'active' : ''}" data-action="all">${icon('layers')}<span>全部任务</span><b>${state.tasks.length}</b></button></nav><div class="sidebar-divider"></div><div class="section-label calendar-label">日期导航 ${icon('calendar')}</div><div id="calendar">${calendar()}</div><button class="back-today" data-action="today">回到今天 ${icon('arrow')}</button><div class="sidebar-note">${icon('spark')}<p>每一小步，都有迹可循。<br><span>专注协作，进度留在这里。</span></p></div><div class="sidebar-bottom"><span class="connection"><i class="${connected || demo ? '' : 'offline'}"></i>${demo ? '示例体验中' : connected ? '已保存到本机' : '服务未连接'}</span>${iconButton('theme', '切换明暗主题', document.documentElement.dataset.theme === 'dark' ? 'sun' : 'moon')}</div><div class="sidebar-version">PROCISION <span>v1.0 / 为专注而造</span></div></aside>`;
+  const pending = tasksOnDay(state.tasks, localDay()).filter(task => taskStatus(task) !== 'done').length;
+  return `<aside class="sidebar"><a href="/" class="brand" aria-label="Procision 首页"><img src="/favicon.svg" alt=""/><span>procision<span class="brand-dot">.</span></span></a><div class="workspace-name"><span class="workspace-avatar">P</span><div>我的工作空间<small>PERSONAL WORKSPACE</small></div><span class="local-tag">本地</span></div><div class="section-label">工作台 <span>WORKSPACE</span></div><nav aria-label="工作台导航"><button class="nav-item ${view === 'day' ? 'active' : ''}" data-action="today">${icon('grid')}<span>每日任务</span><b>${pending}</b></button><button class="nav-item ${view === 'all' ? 'active' : ''}" data-action="all">${icon('layers')}<span>全部任务</span><b>${state.tasks.length}</b></button></nav><div class="sidebar-divider"></div><div class="section-label calendar-label">日期导航 ${icon('calendar')}</div><div id="calendar">${calendar()}</div><button class="back-today" data-action="today">回到今天 ${icon('arrow')}</button><div class="sidebar-note">${icon('spark')}<p>每一小步，都有迹可循。<br><span>专注协作，进度留在这里。</span></p></div><div class="sidebar-bottom"><span class="connection"><i class="${connected || demo ? '' : 'offline'}"></i>${demo ? '示例体验中' : connected ? '已保存到本机' : '服务未连接'}</span>${iconButton('theme', '切换明暗主题', document.documentElement.dataset.theme === 'dark' ? 'sun' : 'moon')}</div><div class="sidebar-version">PROCISION <span>v1.1 / 为专注而造</span></div></aside>`;
 }
 
 function renderSidebarToggle() {
@@ -367,10 +404,11 @@ function mountSidebarResizer() {
 
 function render() {
   statusUI.close(false);
+  parkInlineEditor();
   const pageScroll = { left: window.scrollX, top: window.scrollY };
   rememberColumnScroll();
   const tasks = scopedTasks();
-  const done = tasks.filter(task => task.completedAt).length;
+  const done = tasks.filter(task => taskStatus(task) === 'done').length;
   const waiting = tasks.filter(task => taskStatus(task) === 'waiting').length;
   const steps = tasks.flatMap(progressItems);
   const doneSteps = steps.filter(step => step.status === 'done').length;
@@ -382,6 +420,7 @@ function render() {
   renderSidebarToggle();
   renderInsightsToggle();
   mountColumnScroll();
+  workbenchUI.mount();
   if (view === 'day' && selectedDay < localDay()) $('.list-footnote').innerHTML = `${icon('clock')} 历史日期视图 · 任务展示最新进度，右侧动态按当天记录。`;
   window.scrollTo({ ...pageScroll, behavior: 'instant' });
 }
@@ -399,8 +438,9 @@ function activityPanel() {
 }
 
 function renderTasks() {
+  parkInlineEditor();
   const tasks = scopedTasks();
-  const filters = [['all', '全部', tasks.length], ['open', '未完成', tasks.filter(t => !t.completedAt).length], ['waiting', '待跟进', tasks.filter(t => taskStatus(t) === 'waiting').length], ['done', '已完成', tasks.filter(t => t.completedAt).length]];
+  const filters = [['all', '全部', tasks.length], ['open', '未完成', tasks.filter(t => taskStatus(t) !== 'done').length], ['waiting', '待跟进', tasks.filter(t => taskStatus(t) === 'waiting').length], ['done', '已完成', tasks.filter(t => taskStatus(t) === 'done').length]];
   $('#filters').innerHTML = filters.map(([key, label, count]) => `<button class="filter ${filter === key ? 'selected' : ''}" data-action="filter" data-filter="${key}" aria-pressed="${filter === key}">${label}<span>${count}</span></button>`).join('');
   const visible = filteredTasks();
   $('#task-count').textContent = `${visible.length} 项任务`;
@@ -419,20 +459,35 @@ function renderTasks() {
       }
     }
   }
+  workbenchUI.markSelection();
+  mountInlineEditor();
 }
 
 function taskCard(task, index) {
   const status = taskStatus(task);
+  const activeDirections = task.steps.some(step => stepStatus(step) === 'active');
   const finished = task.steps.filter(step => stepStatus(step) === 'done').length;
   const isCollapsed = collapsed.has(task.id) && !query;
   const work = progressItems(task);
-  const percent = work.length ? Math.round(work.filter(item => item.status === 'done').length / work.length * 100) : (task.completedAt ? 100 : 0);
-  return `<article class="task-card task-${status}" id="task-${task.id}" data-task-id="${task.id}"><header class="task-header"><span class="task-index">${pad(index + 1)}</span><div class="task-title-block"><div class="task-title-line"><h3>${renderBold(task.title, task.bold?.title)}</h3><span class="status-badge ${status}"><i></i>${statusLabels[status]}</span></div><div class="task-meta"><span>${shortDay(task.date)} 创建</span>${task.date < selectedDay && view === 'day' && !task.completedAt ? '<span class="carry-tag">↳ 延续任务</span>' : ''}<span>${finished} / ${task.steps.length} 方向完成</span>${task.steps.some(step => step.substeps?.length) ? `<span>${work.filter(item => item.status === 'done').length} / ${work.length} 进度完成</span>` : ''}</div></div><div class="task-header-actions">${iconButton('edit-task', '编辑任务', 'edit', `data-task="${task.id}"`)}${iconButton('collapse', isCollapsed ? '展开任务' : '折叠任务', isCollapsed ? 'down' : 'up', `data-task="${task.id}" aria-expanded="${!isCollapsed}"`)}</div></header><div class="task-progress"><span style="width:${percent}%"></span></div>${!isCollapsed ? `<div class="task-body">${task.description ? `<p class="task-description">${renderBold(task.description, task.bold?.description)}</p>` : ''}${task.steps.length ? `<ol class="steps">${task.steps.map((step, i) => stepCard(task, step, i)).join('')}</ol>` : '<div class="no-steps">先添加一个并行方向，再在方向下记录每一步进度。</div>'}<div class="task-bottom"><button class="add-step" data-action="new-step" data-task="${task.id}">${icon('plus')}添加方向</button><div>${task.completedAt ? `<button class="text-button" data-action="reopen-task" data-task="${task.id}">重新打开 ${icon('arrow')}</button>` : task.steps.every(step => step.status === 'done') ? `<button class="text-button" data-action="complete-task" data-task="${task.id}">${icon('check')}完成任务</button>` : ''}${iconButton('delete-task', '删除任务', 'trash', `data-task="${task.id}"`)}</div></div></div>` : ''}</article>`;
+  const percent = work.length ? Math.round(work.filter(item => item.status === 'done').length / work.length * 100) : (taskStatus(task) === 'done' ? 100 : 0);
+  return `<article class="task-card task-${status}" id="task-${task.id}" data-task-id="${task.id}">
+    <header class="task-header"><span class="task-index">${pad(index + 1)}</span><div class="task-title-block">
+      <div class="hierarchy-path"><span class="hierarchy-level">任务</span><span>总体目标 · ${activeDirections ? '有方向进行中' : task.statusMode === 'manual' ? '状态手动管理' : task.steps.length ? '状态按方向汇总' : '点击状态开始管理'}</span></div>
+      <div class="task-title-line"><h3>${renderBold(task.title, task.bold?.title)}</h3>${statusUI.chip({ value: status, label: statusLabels[status], name: `任务状态：${task.title}`, key: task.id, attrs: `data-action="choose-status" data-task="${task.id}"` })}</div>
+      <div class="task-meta"><span>${shortDay(task.date)} 创建</span>${task.date < selectedDay && view === 'day' && taskStatus(task) !== 'done' ? '<span class="carry-tag">↳ 延续任务</span>' : ''}<span>${finished} / ${task.steps.length} 方向完成</span>${task.steps.some(step => step.substeps?.length) ? `<span>${work.filter(item => item.status === 'done').length} / ${work.length} 执行项完成</span>` : ''}</div>
+    </div><div class="task-header-actions">${iconButton('edit-task', '编辑任务', 'edit', `data-task="${task.id}"`)}${iconButton('collapse', isCollapsed ? '展开任务' : '折叠任务', isCollapsed ? 'down' : 'up', `data-task="${task.id}" aria-expanded="${!isCollapsed}"`)}</div></header>
+    <div class="task-progress" title="下级执行项完成 ${percent}%"><span style="width:${percent}%"></span></div>
+    ${!isCollapsed ? `<div class="task-body">${task.description ? `<p class="task-description">${renderBold(task.description, task.bold?.description)}</p>` : ''}${task.steps.length ? `<ol class="steps">${task.steps.map((step, i) => stepCard(task, step, i)).join('')}</ol>` : '<div class="no-steps">任务状态可以直接选择。添加方向后，可拆分子进度并关联 Codex 会话。</div>'}<div class="task-bottom"><button class="add-step" data-action="new-step" data-task="${task.id}">${icon('plus')}添加方向</button><div>${taskStatus(task) === 'done' ? `<button class="text-button" data-action="reopen-task" data-task="${task.id}">重新打开 ${icon('arrow')}</button>` : task.steps.every(step => stepStatus(step) === 'done') ? `<button class="text-button" data-action="complete-task" data-task="${task.id}">${icon('check')}完成任务</button>` : ''}${iconButton('delete-task', '删除任务', 'trash', `data-task="${task.id}"`)}</div></div></div>` : ''}
+  </article>`;
 }
 
 function recordContent(content, cls = 'step-content', bold = []) {
   if (!content) return '';
   return `<p class="${cls}">${renderBold(content, bold)}</p>`;
+}
+
+function workbenchButton(attrs) {
+  return `<div class="wb-card-actions"><button type="button" class="wb-connect-card" data-action="open-workbench" ${attrs} ${demo ? 'disabled' : ''}>在 Codex 中打开 ↗</button></div>`;
 }
 
 function stepCard(task, step, index) {
@@ -443,35 +498,41 @@ function stepCard(task, step, index) {
   const status = stepStatus(step);
   const done = children.filter(child => child.status === 'done').length;
   const isCollapsed = collapsedDirections.has(step.id) && !query;
-  const automatic = children.length ? 'disabled title="状态由子进度自动汇总"' : '';
+  const activeChildren = children.some(child => child.status === 'active');
+  const automatic = children.length && (step.statusMode !== 'manual' || activeChildren);
   const folded = foldedSteps.has(foldKey(step.id)) && !query;
   const foldButton = iconButton('fold-step', folded ? '展开方向' : '折叠方向', folded ? 'right' : 'down', `${attrs} aria-expanded="${!folded}"`);
-  if (folded) return `<li class="step step-${status} step-folded" data-step-id="${step.id}"><div class="step-main"><div class="step-heading"><button class="step-title" data-action="fold-step" ${attrs} aria-expanded="false">${renderBold(step.title, step.bold?.title)}</button>${foldButton}</div></div></li>`;
+  const dragHandle = `<button type="button" class="wb-drag-handle" draggable="${!demo}" data-workbench-drag="${step.id}" data-action="open-workbench" ${attrs} ${demo ? 'disabled' : ''} aria-label="拖动或打开 Codex：${escape(step.title)}" title="拖到右侧 Codex，或点击打开">⠿</button>`;
+  if (folded) return `<li class="step step-${status} step-folded" data-step-id="${step.id}"><div class="step-main"><div class="step-heading">${dragHandle}<button class="step-title" data-action="fold-step" ${attrs} aria-expanded="false">${renderBold(step.title, step.bold?.title)}</button>${foldButton}</div>${workbenchButton(attrs)}</div></li>`;
   return `<li class="step step-${status}" data-step-id="${step.id}">
-    <div class="step-track"><button class="step-check" data-action="toggle-step" ${attrs} ${automatic} aria-label="${status === 'done' ? '恢复未完成' : '标记完成'}：${escape(step.title)}" aria-pressed="${status === 'done'}">${status === 'done' ? icon('check') : pad(index + 1)}</button></div>
+    <div class="step-track"><button class="step-check" data-action="${automatic ? 'choose-status' : 'toggle-step'}" ${attrs} aria-label="${automatic ? '选择方向状态' : status === 'done' ? '恢复未完成' : '标记完成'}：${escape(step.title)}" aria-pressed="${status === 'done'}">${status === 'done' ? icon('check') : pad(index + 1)}</button></div>
     <div class="step-main">
-      <div class="step-heading"><button class="step-title" data-action="edit-step" ${attrs}>${renderBold(step.title, step.bold?.title)}</button>${statusUI.chip({ value: status, label: statusLabels[status], name: `方向状态：${step.title}`, key: step.id, attrs: `data-action="choose-status" ${attrs}`, automatic: !!children.length })}${foldButton}</div>
+      <div class="hierarchy-path">${dragHandle}<span class="hierarchy-level">方向</span><span>${activeChildren ? '有子进度进行中' : automatic ? '状态按子进度汇总' : '状态手动管理'}</span></div>
+      <div class="step-heading"><button class="step-title" data-action="edit-step" ${attrs}>${renderBold(step.title, step.bold?.title)}</button>${statusUI.chip({ value: status, label: statusLabels[status], name: `方向状态：${step.title}`, key: step.id, attrs: `data-action="choose-status" ${attrs}` })}${foldButton}</div>
       ${recordContent(step.content, 'step-content', step.bold?.content)}
       <div class="step-footer"><time title="${escape(step.updatedAt)}">${dateTime(step.updatedAt)}</time><div class="step-actions">${iconButton('move-up', '上移方向', 'up', `${attrs} ${index === 0 ? 'disabled' : ''}`)}${iconButton('move-down', '下移方向', 'down', `${attrs} ${index === task.steps.length - 1 ? 'disabled' : ''}`)}${iconButton('new-substep', '添加子进度', 'plus', attrs)}${iconButton('new-result', '记录结果', 'record', attrs)}${iconButton('edit-step', '编辑方向', 'edit', attrs)}${iconButton('delete-step', '删除方向', 'trash', attrs)}</div></div>
       ${children.length ? `<div class="direction-progress">
-        <div class="direction-progress-heading"><button class="substeps-toggle" data-action="collapse-direction" ${attrs} aria-expanded="${!isCollapsed}" aria-controls="substeps-${step.id}">${icon(isCollapsed ? 'right' : 'down')}子进度 <span>${done} / ${children.length} 完成</span></button><span class="direction-auto">状态自动汇总</span></div>
+        <div class="direction-progress-heading"><button class="substeps-toggle" data-action="collapse-direction" ${attrs} aria-expanded="${!isCollapsed}" aria-controls="substeps-${step.id}">${icon(isCollapsed ? 'right' : 'down')}子进度 <span>${done} / ${children.length} 完成</span></button><span class="direction-auto">${automatic ? '完成数与状态自动汇总' : '完成数按子项统计 · 总体状态手动管理'}</span></div>
         <ol class="substeps" id="substeps-${step.id}" ${isCollapsed ? 'hidden' : ''}>${children.map((child, i) => substepCard(task, step, child, i)).join('')}</ol>
       </div>` : ''}
       ${results.length ? `<div class="direction-results">
         <div class="direction-progress-heading"><button class="results-toggle" data-action="collapse-results" ${attrs} aria-expanded="${!resultsCollapsed}" aria-controls="results-${step.id}">${icon(resultsCollapsed ? 'right' : 'down')}结果记录 <span>${results.length} 条</span></button><span class="result-hint">不计入进度</span></div>
         <ol class="results-list" id="results-${step.id}" ${resultsCollapsed ? 'hidden' : ''}>${results.map(result => resultCard(task, step, result)).join('')}</ol>
       </div>` : ''}
+      ${workbenchButton(attrs)}
     </div>
   </li>`;
 }
 
 function substepCard(task, step, child, index) {
   const attrs = `data-task="${task.id}" data-step="${step.id}" data-substep="${child.id}"`;
+  const dragHandle = `<button type="button" class="wb-drag-handle" draggable="${!demo}" data-workbench-drag="${child.id}" data-action="open-workbench" ${attrs} ${demo ? 'disabled' : ''} aria-label="拖动或打开 Codex：${escape(child.title)}" title="拖到右侧 Codex，或点击打开">⠿</button>`;
   return `<li class="substep substep-${child.status}" id="substep-${child.id}" data-substep-id="${child.id}">
     <button class="substep-check" data-action="toggle-substep" ${attrs} aria-label="${child.status === 'done' ? '恢复未完成' : '标记完成'}：${escape(child.title)}" aria-pressed="${child.status === 'done'}">${child.status === 'done' ? icon('check') : pad(index + 1)}</button>
-    <div class="substep-main"><div class="step-heading"><button class="substep-title" data-action="edit-substep" ${attrs}>${renderBold(child.title, child.bold?.title)}</button>${statusUI.chip({ value: child.status, label: statusLabels[child.status], name: `子进度状态：${child.title}`, key: child.id, attrs: `data-action="choose-status" ${attrs}` })}</div>
+    <div class="substep-main"><div class="hierarchy-path">${dragHandle}<span class="hierarchy-level">子方向</span><span>可独立研究</span></div><div class="step-heading"><button class="substep-title" data-action="edit-substep" ${attrs}>${renderBold(child.title, child.bold?.title)}</button>${statusUI.chip({ value: child.status, label: statusLabels[child.status], name: `子进度状态：${child.title}`, key: child.id, attrs: `data-action="choose-status" ${attrs}` })}</div>
       ${child.content ? `<p class="substep-content">${renderBold(child.content, child.bold?.content)}</p>` : ''}
       <div class="substep-footer"><time title="${escape(child.updatedAt)}">${dateTime(child.updatedAt)}</time><div class="substep-actions">${iconButton('move-substep-up', '上移子进度', 'up', `${attrs} ${index === 0 ? 'disabled' : ''}`)}${iconButton('move-substep-down', '下移子进度', 'down', `${attrs} ${index === step.substeps.length - 1 ? 'disabled' : ''}`)}${iconButton('edit-substep', '编辑子进度', 'edit', attrs)}${iconButton('delete-substep', '删除子进度', 'trash', attrs)}</div></div>
+      ${workbenchButton(attrs)}
     </div>
   </li>`;
 }
@@ -482,27 +543,72 @@ function resultCard(task, step, result) {
     <span class="result-symbol">${icon('record')}</span><div class="result-main">
       <button class="result-title" data-action="edit-result" ${attrs}>${renderBold(result.title, result.bold?.title)}</button>
       ${result.content ? `<p class="result-content">${renderBold(result.content, result.bold?.content)}</p>` : ''}${imagesUI.gallery(result.images)}
-      <div class="result-footer"><time title="${escape(result.createdAt)}">${dateTime(result.createdAt)} 记录${result.updatedAt !== result.createdAt ? ` · ${dateTime(result.updatedAt)} 更新` : ''}</time><div class="result-actions">${iconButton('edit-result', '编辑结果', 'edit', attrs)}${iconButton('delete-result', '删除结果', 'trash', attrs)}</div></div>
+      <div class="result-footer"><time title="${escape(result.createdAt)}">${dateTime(result.createdAt)} 记录${result.updatedAt !== result.createdAt ? ` · ${dateTime(result.updatedAt)} 更新` : ''}</time><div class="result-actions"><button class="text-button" data-action="link-result" ${attrs}>${icon('book')}关联思考与结论</button>${iconButton('edit-result', '编辑结果', 'edit', attrs)}${iconButton('delete-result', '删除结果', 'trash', attrs)}</div></div>
+      ${(state.notes || []).filter(note => note.sources?.some(source => source.resultId === result.id)).map(note => `<button class="source-link" data-note-action="read" data-note="${escape(note.id)}">${icon('book')}<span>${escape(note.title)}${note.archivedAt ? '（已归档）' : ''}</span>${icon('arrow')}</button>`).join('')}
     </div>
   </li>`;
 }
 
 function chooseStatus(anchor, task, step, child) {
-  if (!child && step.substeps?.length) {
-    statusUI.open({ anchor, value: '', description: '方向状态由子进度自动汇总。选择一条子进度，可在这里直接切换它的状态。', options: step.substeps.map(item => ({ value: item.id, label: item.title, detail: statusLabels[item.status], color: item.status, action: true })), onSelect: childId => {
-      const current = state.tasks.find(item => item.id === task.id)?.steps.find(item => item.id === step.id);
-      const target = current?.substeps?.find(item => item.id === childId);
+  const item = child || step || task;
+  const children = child ? [] : step ? step.substeps || [] : task.steps;
+  const automatic = !child && children.length > 0 && item.statusMode !== 'manual';
+  const activeChildren = !child && children.some(c => step ? c.status === 'active' : stepStatus(c) === 'active');
+  const value = child ? child.status : step ? stepStatus(step) : taskStatus(task);
+  const description = child ? (anchor.dataset.substep ? '' : child.title) : activeChildren ? `有${step ? '子进度' : '方向'}正在进行，总体状态保持进行中。调整下级状态后，可选择其它总体状态。` : `${step ? '方向' : '任务'}总体状态${automatic ? `由${step ? '子进度' : '方向'}自动汇总` : '由你手动管理'}。选择状态不会修改下级，完成数仍按下级统计。`;
+  const options = Object.entries(statusLabels).map(([value, label]) => ({ value, label, disabled: activeChildren && value !== 'active' }));
+  if (children.length) options.push({ value: 'auto', label: step ? '跟随子进度汇总' : '跟随方向汇总', detail: automatic ? '当前模式' : '自动', color: 'active' });
+  if (step && !child) options.push(...children.map(c => ({ value: c.id, label: c.title, detail: statusLabels[c.status], color: c.status, action: true })));
+  statusUI.open({ anchor, value: automatic ? 'auto' : value, description, options, allowSame: !child && item.statusMode !== 'manual', onSelect: async status => {
+    if (step && !child && children.some(c => c.id === status)) {
+      const current = state.tasks.find(t => t.id === task.id)?.steps.find(s => s.id === step.id);
+      const target = current?.substeps?.find(c => c.id === status);
       if (target) chooseStatus(anchor, task, current, target);
-    } });
-    return;
-  }
-  const item = child || step;
-  statusUI.open({ anchor, value: item.status, description: child && !anchor.dataset.substep ? child.title : '', options: Object.entries(statusLabels).map(([value, label]) => ({ value, label })), onSelect: async status => {
-    await mutate({ type: child ? 'set-substep-status' : 'set-step-status', taskId: task.id, stepId: step.id, ...(child ? { substepId: child.id } : {}), status }, `已切换为${statusLabels[status]}`);
+      return;
+    }
+    await mutate({ type: child ? 'set-substep-status' : step ? 'set-step-status' : 'set-task-status', taskId: task.id, ...(step ? { stepId: step.id } : {}), ...(child ? { substepId: child.id, status } : status === 'auto' ? { statusMode: 'auto' } : { status, statusMode: 'manual' }) }, status === 'auto' ? '已恢复自动汇总' : `已切换为${statusLabels[status]}`);
   } });
 }
 
+function parkInlineEditor() {
+  if (!editorPanel.classList.contains('inline-editor') || !editorPanel.closest('#app')) return;
+  const focused = document.activeElement;
+  if (editorPanel.contains(focused)) {
+    const selection = window.getSelection();
+    inlineFocus = { element: focused, range: selection.rangeCount && editorPanel.contains(selection.anchorNode) ? selection.getRangeAt(0).cloneRange() : null };
+  }
+  editorPanel.parentElement.classList.remove('inline-editing');
+  document.body.append(editorPanel);
+}
+
+function mountInlineEditor() {
+  if (!editorPanel.open || !formContext?.inline) return;
+  const { taskId, stepId, substepId, resultId } = formContext;
+  const host = resultId ? $(`[data-result-id="${resultId}"] > .result-main`)
+    : substepId ? $(`[data-substep-id="${substepId}"] > .substep-main`)
+    : stepId ? $(`[data-step-id="${stepId}"] > .step-main`) : $(`[data-task-id="${taskId}"]`);
+  if (host) { host.classList.add('inline-editing'); host.prepend(editorPanel); }
+  else $('.task-workspace').insertBefore(editorPanel, $('#task-list'));
+  if (inlineFocus) {
+    const { element, range } = inlineFocus; inlineFocus = null;
+    element.focus({ preventScroll: true });
+    if (range) { const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range); }
+  }
+}
+
+function closeEditor() {
+  const form = editorPanel.querySelector('#editor-form');
+  if (form) imagesUI.unmount(form);
+  editorPanel.close();
+  editorPanel.parentElement?.classList.remove('inline-editing');
+  editorPanel.classList.remove('inline-editor');
+  document.body.append(editorPanel);
+  inlineFocus = null;
+  if (formContext) formContext.inline = false;
+}
+
 function openEditor(kind, taskId, stepId, substepId, resultId) {
+  closeEditor();
   const task = state.tasks.find(item => item.id === taskId);
   const step = task?.steps.find(item => item.id === stepId);
   const isStep = kind.includes('step');
@@ -517,7 +623,10 @@ function openEditor(kind, taskId, stepId, substepId, resultId) {
   let draft;
   try { draft = JSON.parse(readLocal(draftKey)); } catch { /* Ignore an invalid browser draft. */ }
   const source = draft || value || {};
-  formContext = { kind, taskId, stepId, substepId, resultId, draftKey };
+  const activeChildren = automatic && step.substeps.some(child => child.status === 'active');
+  const selectedStatus = activeChildren ? (step.statusMode === 'manual' ? 'active' : 'auto') : automatic ? (draft?.status || (step.statusMode === 'manual' ? stepStatus(step) : 'auto')) : source.status || 'active';
+  const inline = edit && document.documentElement.dataset.workbench === 'cli';
+  formContext = { kind, taskId, stepId, substepId, resultId, draftKey, inline };
   $('#editor').innerHTML = `<form id="editor-form">
     <div class="dialog-top"><div class="dialog-icon">${icon(isResult ? 'record' : isStep ? 'layers' : 'plus')}</div>${iconButton('close-dialog', '关闭窗口', 'close')}</div>
     <div class="eyebrow">${isResult ? 'KEEP THE RESULT' : isChild ? 'ONE STEP FORWARD' : isStep ? 'A PARALLEL DIRECTION' : 'MAKE ROOM FOR AN IDEA'}</div>
@@ -527,17 +636,29 @@ function openEditor(kind, taskId, stepId, substepId, resultId) {
     <input class="field" id="form-title" name="title" required maxlength="200" autocomplete="off" placeholder="${isResult ? '例如：第一轮验证的结果与结论' : isChild ? '例如：完成第一轮验证并记录结果' : isStep ? '例如：研究中心漂移的调整方式' : '例如：搭建我的 AI 协作工作台'}" value="${escape(source.title || '')}">
     <label class="field-label" for="form-content">${isResult ? '结果内容' : isStep ? '进度记录' : '补充说明'} <small>可选</small></label>
     <textarea class="field" id="form-content" name="${isRecord ? 'content' : 'description'}" rows="${isRecord ? '7' : '4'}" maxlength="${isRecord ? '50000' : '10000'}" placeholder="${isResult ? '记录这次得到了什么结果、有什么发现，也可以粘贴 AI 输出或截图。' : isStep ? '把 AI 的回复、已完成的工作、遇到的问题粘贴在这里…\n支持多行文本，保留原始换行。' : '这个任务想解决什么问题？可以记下背景或目标。'}">${escape((isRecord ? source.content : source.description) || '')}</textarea>
-    ${automatic ? '<p class="direction-status-hint">这个方向的状态由子进度自动汇总。全部子进度完成后，方向会自动完成。</p>' : isStep ? `<label class="field-label">当前状态</label><div class="status-options">${Object.entries(statusLabels).map(([value, label]) => `<label class="status-option ${value}"><input type="radio" name="status" value="${value}" ${(source.status || 'active') === value ? 'checked' : ''}><span><i></i>${label}</span></label>`).join('')}</div>` : !edit && !isResult ? `<label class="field-label" for="form-date">所属日期</label><input class="field date-field" type="date" id="form-date" name="date" required value="${escape(source.date || (view === 'all' ? localDay() : selectedDay))}">` : ''}
+    ${isStep ? `<label class="field-label">${automatic ? '方向总体状态' : '当前状态'}</label><div class="status-options">${[...Object.entries(statusLabels), ...(automatic ? [['auto', '跟随子进度汇总']] : [])].map(([value, label]) => `<label class="status-option ${value}"><input type="radio" name="status" value="${value}" ${selectedStatus === value ? 'checked' : ''}><span><i></i>${label}</span></label>`).join('')}</div>${automatic ? '<p class="direction-status-hint">手动选择只修改方向总体状态，保留每条子进度的状态与完成数；选择“跟随子进度汇总”可恢复自动管理。</p>' : ''}` : !edit && !isResult ? `<label class="field-label" for="form-date">所属日期</label><input class="field date-field" type="date" id="form-date" name="date" required value="${escape(source.date || (view === 'all' ? localDay() : selectedDay))}">` : ''}
     <div class="dialog-footer"><span>${draft ? '已恢复未保存的草稿' : 'Ctrl + Enter 快速保存'}</span><div><button type="button" class="button secondary" data-action="close-dialog">取消</button><button type="submit" class="button primary">${icon('check')}${edit ? '保存修改' : isResult ? '保存结果' : isStep ? `添加${noun}` : '创建任务'}</button></div></div>
   </form>`;
-  $('#editor').showModal();
+  if (inline) {
+    editorPanel.classList.add('inline-editor');
+    editorPanel.show(); mountInlineEditor();
+  } else editorPanel.showModal();
   const form = $('#editor-form');
+  if (activeChildren) {
+    for (const radio of form.querySelectorAll('input[name=status]')) radio.disabled = !['active', 'auto'].includes(radio.value);
+    form.querySelector('.direction-status-hint').textContent = '有子进度正在进行，方向保持进行中。先调整子进度状态，再选择其它总体状态。';
+  }
   mountBoldEditors(form, source);
   imagesUI.mount(form, source.images ?? value?.images ?? [], draftKey, () => saveLocal(draftKey, JSON.stringify(editorValues(form))));
-  $('#form-title').focus();
+  $('#form-title').focus({ preventScroll: inline });
+  if (inline) {
+    const panel = $('.task-workspace'), top = editorPanel.getBoundingClientRect().top - panel.getBoundingClientRect().top;
+    panel.scrollTop += top - 12;
+  }
 }
 
 function confirmDelete(kind, taskId, stepId, substepId, resultId) {
+  closeEditor();
   const task = state.tasks.find(item => item.id === taskId);
   const step = task?.steps.find(item => item.id === stepId);
   const child = step?.substeps?.find(item => item.id === substepId);
@@ -561,6 +682,7 @@ document.addEventListener('click', async event => {
   const task = state.tasks.find(item => item.id === taskId);
   const step = task?.steps.find(item => item.id === stepId);
   switch (action) {
+    case 'open-workbench': workbenchUI.open(substepId || stepId); break;
     case 'choose-status': chooseStatus(button, task, step, substepId ? step.substeps.find(item => item.id === substepId) : undefined); break;
     case 'toggle-insights': {
       const panel = $('.insights');
@@ -599,7 +721,7 @@ document.addEventListener('click', async event => {
       calendarMonth = date.toISOString().slice(0, 7); $('#calendar').innerHTML = calendar(); break;
     }
     case 'theme': document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; saveLocal('procision-theme', document.documentElement.dataset.theme); render(); break;
-    case 'demo': demo = !demo; history.replaceState(null, '', demo ? '/?demo' : '/'); filter = 'all'; query = ''; collapsed.clear(); await load(); break;
+    case 'demo': closeEditor(); demo = !demo; history.replaceState(null, '', demo ? '/?demo' : '/'); filter = 'all'; query = ''; collapsed.clear(); await load(); break;
     case 'reload': await load(); break;
     case 'filter': filter = button.dataset.filter; renderTasks(); break;
     case 'clear-filters': filter = 'all'; query = ''; $('#search').value = ''; renderTasks(); break;
@@ -610,6 +732,7 @@ document.addEventListener('click', async event => {
     case 'new-substep': openEditor('create-substep', taskId, stepId); break;
     case 'edit-substep': openEditor('edit-substep', taskId, stepId, substepId); break;
     case 'new-result': openEditor('create-result', taskId, stepId); break;
+    case 'link-result': notesUI.linkResult(resultId); break;
     case 'edit-result': openEditor('edit-result', taskId, stepId, undefined, resultId); break;
     case 'collapse-results': collapsedResults.has(stepId) ? collapsedResults.delete(stepId) : collapsedResults.add(stepId); renderTasks(); break;
     case 'collapse-direction': collapsedDirections.has(stepId) ? collapsedDirections.delete(stepId) : collapsedDirections.add(stepId); renderTasks(); break;
@@ -625,19 +748,19 @@ document.addEventListener('click', async event => {
       break;
     }
     case 'move-substep-up': case 'move-substep-down': await mutate({ type: 'move-substep', taskId, stepId, substepId, direction: action === 'move-substep-up' ? -1 : 1 }); break;
-    case 'close-dialog': $('#editor').close(); break;
+    case 'close-dialog': closeEditor(); break;
     case 'collapse': collapsed.has(taskId) ? collapsed.delete(taskId) : collapsed.add(taskId); renderTasks(); break;
     case 'collapse-all': {
       const visible = filteredTasks(); const allCollapsed = visible.every(task => collapsed.has(task.id));
       visible.forEach(task => allCollapsed ? collapsed.delete(task.id) : collapsed.add(task.id));
       button.innerHTML = `${icon('layers')}${allCollapsed ? '折叠全部' : '展开全部'}`; renderTasks(); break;
     }
-    case 'toggle-step': await mutate({ type: 'set-step-status', taskId, stepId, status: step.status === 'done' ? 'active' : 'done' }, step.status === 'done' ? '已恢复为进行中' : '又完成了一步'); break;
+    case 'toggle-step': await mutate({ type: 'set-step-status', taskId, stepId, status: stepStatus(step) === 'done' ? 'active' : 'done' }, stepStatus(step) === 'done' ? '已恢复为进行中' : '又完成了一步'); break;
     case 'move-up': case 'move-down': await mutate({ type: 'move-step', taskId, stepId, direction: action === 'move-up' ? -1 : 1 }); break;
     case 'complete-task': await mutate({ type: 'complete-task', taskId }, '任务已完成'); break;
     case 'reopen-task': await mutate({ type: 'reopen-task', taskId }, '任务已重新打开'); break;
     case 'delete-task': case 'delete-step': case 'delete-substep': case 'delete-result': confirmDelete(action, taskId, stepId, substepId, resultId); break;
-    case 'confirm-delete': if (await mutate({ type: button.dataset.kind, taskId, stepId, substepId, resultId }, '已删除')) $('#editor').close(); break;
+    case 'confirm-delete': if (await mutate({ type: button.dataset.kind, taskId, stepId, substepId, resultId }, '已删除')) closeEditor(); break;
     case 'focus-task': filter = 'all'; query = ''; $('#search').value = ''; collapsed.delete(taskId); collapsedDirections.delete(stepId); setStepFolded(stepId, false); renderTasks(); $(substepId ? `#substep-${substepId}` : `#task-${taskId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }); break;
   }
 });
@@ -664,21 +787,30 @@ document.addEventListener('submit', async event => {
   try { validateBoldEditors(event.target); } catch (error) { showError(error.message); return; }
   const values = editorValues(event.target);
   const { kind, taskId, stepId, substepId, resultId, draftKey } = formContext;
+  if (kind === 'edit-step' && state.tasks.find(t => t.id === taskId)?.steps.find(s => s.id === stepId)?.substeps?.length) {
+    values.statusMode = values.status === 'auto' ? 'auto' : 'manual';
+    if (values.statusMode === 'auto') delete values.status;
+  }
   if (kind === 'create-substep') collapsedDirections.delete(stepId);
   if (kind === 'create-result') collapsedResults.delete(stepId);
   const submit = event.target.querySelector('[type=submit]');
   submit.disabled = true;
   if (await mutate({ type: kind, taskId, stepId, substepId, resultId, ...values }, kind.startsWith('edit') ? '修改已保存' : kind.includes('result') ? '结果已保存' : kind.includes('step') ? '进度已添加' : '任务已创建')) {
     await imagesUI.commit(event.target);
-    saveLocal(draftKey, null); $('#editor').close();
+    saveLocal(draftKey, null);
+    if (event.target === $('#editor-form')) closeEditor();
   }
   submit.disabled = false;
 });
 document.addEventListener('keydown', event => {
+  if (event.target.closest('#workbench-root') || $('#workspace-settings')?.open || $('#workspace-files')?.open) return;
   if ($('#image-viewer')?.open) return;
   if (event.target.closest('.status-menu')) return;
   if ($('#editor').open) {
-    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); $('#editor-form')?.requestSubmit(); }
+    if (!formContext?.inline || event.target.closest('#editor')) {
+      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); $('#editor-form')?.requestSubmit(); }
+      if (formContext?.inline && event.key === 'Escape' && !event.isComposing) { event.preventDefault(); closeEditor(); }
+    }
     return;
   }
   if (/INPUT|TEXTAREA|SELECT/.test(event.target.tagName) || event.ctrlKey || event.metaKey || event.altKey) return;

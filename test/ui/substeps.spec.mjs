@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures.mjs';
 import { localDay } from '../../lib/domain.mjs';
 
 async function seed(page, title) {
@@ -45,7 +45,7 @@ test('parallel directions contain ordered progress with images, search, rollups 
   await page.getByRole('radio', { name: '待跟进', exact: true }).check();
   await page.getByRole('dialog').getByRole('button', { name: '添加子进度', exact: true }).click();
   await expect(task).toHaveClass(/task-waiting/);
-  await expect(direction.getByLabel('方向状态：中心调整方向')).toContainText('自动');
+  await expect(direction.getByLabel('方向状态：中心调整方向', { exact: true })).not.toContainText('自动');
   await expect(other).toHaveClass(/step-done/);
   await direction.getByRole('button', { name: '添加子进度', exact: true }).click();
   await page.getByLabel('子进度标题').fill('第二轮验证');

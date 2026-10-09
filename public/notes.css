@@ -1,4 +1,19 @@
 /* The notes feature is scoped to its own panel and dialog. */
+.note-sources { margin: 12px 0; }
+.source-heading { font-size: 10px; color: var(--dim); }
+.source-link { display: flex; align-items: center; gap: 7px; width: 100%; background: var(--cyan-soft); border: 1px solid var(--cyan-border); border-radius: 5px; padding: 8px; margin-top: 6px; color: var(--cyan); text-align: left; font-size: 11px; line-height: 1.7; }
+.source-link span { flex: 1; overflow-wrap: anywhere; min-width: 0; }
+.source-link .icon { width: 13px; height: 13px; flex-shrink: 0; }
+.source-link:hover:not(:disabled) { background: var(--input); }
+.source-link:disabled { color: var(--dim); cursor: default; border-color: var(--border); background: transparent; }
+.source-options { margin: 18px 0; font-size: 12px; }
+.source-options summary { cursor: pointer; color: var(--muted); padding: 8px 0; }
+.source-choices, .link-note-list { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; }
+.link-note-list { margin-top: 16px; }
+.source-choices label { display: flex; align-items: flex-start; gap: 9px; padding: 8px; border-radius: 4px; line-height: 1.8; cursor: pointer; }
+.source-choices label:hover { background: var(--input); }
+.source-choices input { margin-top: 4px; accent-color: var(--cyan); }
+.source-choices span { overflow-wrap: anywhere; min-width: 0; }
 .notes-panel .panel-heading { padding-top: 12px; }
 .notes-panel .panel-heading h2 { gap: 6px; }
 .notes-panel .panel-heading h2 .icon { width: 14px; height: 14px; color: var(--cyan); }

@@ -63,6 +63,13 @@ export function createImageUI({ escape, icon, isDemo, showError }) {
     await Promise.allSettled(state.items.filter(item => item.persisted).map(item => draftStore('remove', item.key)));
   }
 
+  function unmount(form) {
+    const state = forms.get(form);
+    if (!state) return;
+    state.dialog?.removeEventListener('close', state.onClose);
+    if (!state.demo) for (const item of state.items) if (item.preview?.startsWith('blob:')) URL.revokeObjectURL(item.preview);
+  }
+
   async function upload(form, item) {
     const state = forms.get(form);
     item.status = 'uploading'; item.error = ''; render(form);
@@ -152,9 +159,13 @@ export function createImageUI({ escape, icon, isDemo, showError }) {
       await draftStore('remove', item.key).catch(() => { state.message = '移除草稿失败，请重试'; });
       state.onChange(); render(form);
     });
-    form.closest('dialog').addEventListener('close', () => {
-      if (!state.demo) for (const item of state.items) if (item.preview?.startsWith('blob:')) URL.revokeObjectURL(item.preview);
-    }, { once: true });
+    state.dialog = form.closest('dialog');
+    state.onClose = () => {
+      // A previous editor's queued close event can arrive after the next opens.
+      if (state.dialog.open && form.isConnected) return;
+      unmount(form);
+    };
+    state.dialog.addEventListener('close', state.onClose);
   }
 
   const viewer = document.createElement('dialog');
@@ -167,5 +178,5 @@ export function createImageUI({ escape, icon, isDemo, showError }) {
     viewer.showModal();
   });
   viewer.addEventListener('click', event => { if (event.target === viewer) viewer.close(); });
-  return { mount, gallery, get, ready, commit };
+  return { mount, gallery, get, ready, commit, unmount };
 }

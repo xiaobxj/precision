@@ -149,6 +149,9 @@ input::placeholder, textarea::placeholder { color: var(--dim); }
 .task-index { font: 10px var(--mono); color: var(--status-color); border: 1px solid var(--border); background: var(--raised); border-radius: 5px; padding: 6px; margin-top: 1px; }
 .task-title-block { flex: 1; min-width: 0; }
 .task-title-line { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.hierarchy-path { display:flex; align-items:center; flex-wrap:wrap; gap:7px; margin:0 0 7px; color:var(--dim); font-size:9px; line-height:1.8; }
+.hierarchy-level { padding:0 5px; border:1px solid var(--border); border-radius:4px; color:var(--muted); background:var(--input); white-space:nowrap; }
+.task-title-block > .hierarchy-path .hierarchy-level { color:var(--cyan); border-color:var(--cyan-border); }
 .task-title-line h3 { font-size: 14px; font-weight: 600; line-height: 1.7; overflow-wrap: anywhere; }
 .status-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 9px; color: var(--cyan); border: 1px solid var(--cyan-border); background: var(--cyan-soft); border-radius: 4px; padding: 3px 6px; white-space: nowrap; }
 .status-badge i { width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
@@ -404,7 +407,7 @@ html[data-sidebar=collapsed] { --sidebar-width: 60px; }
 [data-resizing=sidebar] .sidebar, [data-resizing=sidebar] .main-shell, [data-resizing=sidebar] .workspace-columns, [data-resizing=sidebar] #sidebar-resizer { transition: none !important; }
 
 /* A direction contains an ordered list of progress records. */
-.direction-progress { margin: 8px 0 4px; padding: 10px 0 0 12px; border-left: 1px solid var(--cyan-border); }
+.direction-progress { margin: 12px 0 4px; padding: 12px 10px 4px 14px; border-left: 2px solid var(--cyan-border); border-radius:0 6px 6px 0; background:var(--input); }
 .direction-progress-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
 .substeps-toggle { display: inline-flex; align-items: center; gap: 5px; padding: 0; background: none; color: var(--muted); font-size: 10px; }
 .substeps-toggle .icon { width: 12px; height: 12px; }
@@ -494,3 +497,6 @@ html[data-sidebar=collapsed] { --sidebar-width: 60px; }
   [data-insights=collapsed] .insights-toggle { flex-direction: column; width: 100%; padding: 12px 6px; }
   [data-insights=collapsed] .insights-toggle span { writing-mode: vertical-rl; letter-spacing: 3px; }
 }
+
+.source-highlight { outline: 2px solid var(--cyan); outline-offset: 5px; border-radius: 4px; background: var(--cyan-soft); }
+.result-actions .text-button { font-size: 10px; color: var(--cyan); }

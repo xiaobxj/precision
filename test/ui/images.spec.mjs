@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures.mjs';
 
 async function pasteScreenshot(page, selector) {
   await page.locator(selector).evaluate(async input => {

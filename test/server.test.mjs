@@ -15,7 +15,7 @@ test('API persists across restart, rejects stale writes and isolates static file
   const send = (body, headers = {}) => fetch(`${url}/api/commands`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
   const first = await send({ revision: 0, command: { type: 'create-task', title: '持久保存', description: '多行\n进度', date: '2026-09-30' } });
   assert.equal(first.status, 200);
-  const state = await first.json();
+  let state = await first.json();
   assert.equal(state.tasks[0].title, '持久保存');
   const collision = await send({ revision: 0, command: { type: 'delete-task', taskId: state.tasks[0].id } });
   assert.equal(collision.status, 409);
@@ -28,6 +28,11 @@ test('API persists across restart, rejects stale writes and isolates static file
   const backup = readdirSync(join(dataDir, 'backups'));
   assert.equal(backup.length, 1);
   assert.equal(JSON.parse(readFileSync(join(dataDir, 'backups', backup[0]), 'utf8')).revision, 0);
+  const statusChange = await send({ revision: state.revision, command: { type: 'set-task-status', taskId: state.tasks[0].id, status: 'active' } });
+  assert.equal(statusChange.status, 200);
+  state = await statusChange.json();
+  assert.equal(state.tasks[0].statusMode, 'manual');
+  assert.equal(state.tasks[0].status, 'active');
   await new Promise(resolve => server.close(resolve));
   server = createApp({ dataDir });
   url = await start();

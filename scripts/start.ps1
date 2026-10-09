@@ -1,7 +1,7 @@
 param([switch]$NoBrowser)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$port = 4311
+$port = 4312
 $address = "http://127.0.0.1:$port"
 $healthy = $false
 try {

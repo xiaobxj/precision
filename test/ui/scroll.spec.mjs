@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures.mjs';
 import { applyCommand, emptyState, localDay } from '../../lib/domain.mjs';
 
 test('columns and surrounding page scroll independently, retain reading positions and adapt to phones', async ({ page }) => {

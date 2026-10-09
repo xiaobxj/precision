@@ -81,3 +81,26 @@ test('a task completed before its planned day is still visible on that day', () 
   f.run({ type: 'complete-task', taskId });
   assert.ok(tasksOnDay(f.state.tasks, '2026-10-02').some(task => task.id === taskId));
 });
+
+test('empty tasks have editable persistent status and manual completion controls day carryover', () => {
+  const f = fixture();
+  const command = { type: 'set-task-status', taskId: f.taskId };
+  for (const status of ['active', 'waiting', 'todo', 'done']) {
+    f.run({ ...command, status });
+    assert.equal(taskStatus(f.state.tasks[0]), status);
+    assert.equal(Boolean(f.state.tasks[0].completedAt), status === 'done');
+    assert.equal(tasksOnDay(f.state.tasks, '2026-10-01').length, status === 'done' ? 0 : 1);
+  }
+  f.run({ ...command, status: 'active' });
+  f.run({ type: 'create-step', taskId: f.taskId, title: '已完成部分', status: 'done' });
+  assert.equal(taskStatus(f.state.tasks[0]), 'active');
+  assert.equal(f.state.tasks[0].completedAt, null);
+  const before = structuredClone(f.state);
+  assert.throws(() => f.run({ ...command, status: 'invalid' }), /状态/);
+  assert.throws(() => f.run({ ...command, statusMode: 'invalid' }), /状态模式/);
+  assert.deepEqual(f.state, before);
+  f.run({ ...command, statusMode: 'auto' });
+  assert.equal(taskStatus(f.state.tasks[0]), 'done');
+  f.run({ type: 'reopen-task', taskId: f.taskId });
+  assert.equal(taskStatus(f.state.tasks[0]), 'active');
+});

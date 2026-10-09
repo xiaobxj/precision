@@ -1,5 +1,70 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures.mjs';
 import { localDay } from '../../lib/domain.mjs';
+
+test('top-level tasks and parent directions have independent manual states with an explicit return to aggregation', async ({ page }) => {
+  let state;
+  const run = async command => {
+    state = await (await page.request.get('/api/state')).json();
+    const response = await page.request.post('/api/commands', { data: { revision: state.revision, command } });
+    expect(response.ok()).toBeTruthy(); state = await response.json();
+  };
+  await run({ type: 'create-task', title: '总体研究任务（测试）', date: localDay() });
+  const taskId = state.tasks.at(-1).id;
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  try {
+    await page.goto('/');
+    const task = page.locator(`[data-task-id="${taskId}"]`);
+    const taskStatus = task.getByRole('button', { name: '任务状态：总体研究任务（测试）', exact: true });
+    await taskStatus.click();
+    await page.getByRole('menuitemradio', { name: '进行中', exact: true }).click();
+    await expect(taskStatus).toHaveText('进行中');
+    await page.reload(); await expect(taskStatus).toHaveText('进行中');
+    await run({ type: 'create-step', taskId, title: '合约切换验证', status: 'active' });
+    const stepId = state.tasks.at(-1).steps[0].id;
+    await run({ type: 'create-substep', taskId, stepId, title: '等待验证结果', content: '不要批量改动我的子进度', status: 'waiting' });
+    await page.reload();
+    const direction = task.locator(`[data-step-id="${stepId}"]`);
+    const parentStatus = direction.getByRole('button', { name: '方向状态：合约切换验证', exact: true });
+    const childStatus = direction.getByRole('button', { name: '子进度状态：等待验证结果', exact: true });
+    await expect(parentStatus).toHaveText('待跟进');
+    await parentStatus.click();
+    await page.getByRole('menuitemradio', { name: '进行中', exact: true }).click();
+    await expect(parentStatus).toHaveText('进行中');
+    await expect(childStatus).toHaveText('待跟进');
+    await expect(direction.locator('.direction-auto')).toContainText('总体状态手动管理');
+    await page.locator('[data-wb-mode="cli"]').click();
+    await expect(page.locator(`.wb-ongoing [data-direction="${stepId}"]`)).toBeVisible();
+    await page.locator('[data-wb-mode="progress"]').click();
+    await childStatus.click();
+    await page.getByRole('menuitemradio', { name: '已完成', exact: true }).click();
+    await expect(parentStatus).toHaveText('进行中');
+    await expect(taskStatus).toHaveText('进行中');
+    await expect(direction.locator('.substeps-toggle')).toContainText('1 / 1 完成');
+    await parentStatus.click();
+    await page.getByRole('menuitemradio', { name: '跟随子进度汇总', exact: false }).click();
+    await expect(parentStatus).toHaveText('已完成');
+    await taskStatus.click();
+    await page.getByRole('menuitemradio', { name: '跟随方向汇总', exact: false }).click();
+    await expect(taskStatus).toHaveText('已完成');
+    await task.getByRole('button', { name: '重新打开', exact: false }).click();
+    await expect(taskStatus).toHaveText('进行中');
+    await direction.getByRole('button', { name: '编辑方向', exact: true }).click();
+    await page.getByRole('radio', { name: '进行中', exact: true }).check();
+    await page.getByRole('button', { name: '保存修改', exact: true }).click();
+    await page.reload();
+    await expect(parentStatus).toHaveText('进行中');
+    await expect(childStatus).toHaveText('已完成');
+    await expect(task).toContainText('不要批量改动我的子进度');
+    await task.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: 'test-results/hierarchy-status-desktop.png' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await taskStatus.click();
+    await expect(page.getByRole('menuitemradio', { name: '进行中', exact: true })).toHaveAttribute('aria-checked', 'true');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: 'test-results/hierarchy-status-mobile.png' });
+    expect(errors).toEqual([]);
+  } finally { await run({ type: 'delete-task', taskId }); }
+});
 
 test('status labels change direction and child status without editing, including keyboard, failure and reload', async ({ page }) => {
   let state = await (await page.request.get('/api/state')).json();
@@ -46,7 +111,7 @@ test('status labels change direction and child status without editing, including
     await page.unroute('**/api/commands');
     // Aggregated directions expose their children in place; no unrelated status is changed.
     await auto.getByRole('button', { name: '方向状态：自动方向', exact: true }).click();
-    await expect(page.getByRole('menu')).toContainText('由子进度自动汇总');
+    await expect(page.getByRole('menu')).toContainText('有子进度正在进行');
     await page.getByRole('menuitem', { name: '第一步 进行中' }).click();
     await page.getByRole('menuitemradio', { name: '待跟进', exact: true }).click();
     await expect(auto.getByRole('button', { name: '方向状态：自动方向', exact: true })).toContainText('待跟进');

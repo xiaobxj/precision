@@ -1,4 +1,10 @@
 node_modules/
+.npm-cache/
+.verification/
+# One-time local migration and live-page capture helpers
+scripts/refresh-initial-snapshot.mjs
+scripts/sync-legacy-workspace.mjs
+scripts/capture-workbench.mjs
 data/
 test-results/
 playwright-report/

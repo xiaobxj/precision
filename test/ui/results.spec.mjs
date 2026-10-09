@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures.mjs';
 import { localDay } from '../../lib/domain.mjs';
 
 async function seed(page, title) {
